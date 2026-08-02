@@ -3,7 +3,6 @@ import {
   ODYSSEY_ADDRESSES,
   noxaTokenLaunchedEvent,
   odysseyTokenCreatedEvent,
-  watchLaunches,
   type HoodClient,
 } from 'hoodchain'
 import type { Address } from 'viem'
@@ -29,10 +28,10 @@ const CURSOR_KEY = 'launch_scan_block'
  * address filter, so even the initial full scan is a few hundred cheap
  * `eth_getLogs` calls, done once, in the background. Each launch gets its
  * exact block timestamp (one `getBlock` per launch), so ages are real, not
- * estimates. A live watcher covers everything after the scan.
+ * estimates. Live launches are handled by the launchpad detectors, which
+ * also alert on them.
  */
 export class LaunchTracker {
-  private unwatch: (() => void) | null = null
   private scanning = false
 
   constructor(
@@ -42,24 +41,7 @@ export class LaunchTracker {
   ) {}
 
   async start(): Promise<void> {
-    this.unwatch = watchLaunches(
-      this.client,
-      (launch) => {
-        this.store.upsertToken({
-          token: launch.token.toLowerCase(),
-          creator: launch.creator.toLowerCase(),
-          launchpad: launch.launchpad,
-          firstSeenS: Math.floor(Date.now() / 1000),
-        })
-      },
-      { onError: (err) => logger.warn({ err: String(err) }, 'launch watcher error') },
-    )
     void this.scan().catch((err) => logger.warn({ err: String(err) }, 'launch history scan failed'))
-  }
-
-  stop(): void {
-    this.unwatch?.()
-    this.unwatch = null
   }
 
   private async scan(): Promise<void> {

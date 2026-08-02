@@ -1,5 +1,5 @@
 import { MAINNET_EXPLORER_URL } from 'hoodchain'
-import type { SpikeAlert } from '../engine/detector.js'
+import type { Alert, MarketContext } from '../engine/events.js'
 
 /** Compact USD: $931.61 below $1k, $5.8K to $999.9K, $26.18M above. */
 export function fmtUsd(n: number): string {
@@ -38,21 +38,15 @@ export function fmtAge(seconds: number): string {
   return `${(hours / 24).toFixed(1)}d`
 }
 
+export function shortAddr(address: string): string {
+  return `${address.slice(0, 6)}…${address.slice(-4)}`
+}
+
 export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
-function emojiFor(multiple: number): string {
-  if (multiple >= 20) return '\u{1F4A5}' // collision
-  if (multiple >= 10) return '\u{1F680}' // rocket
-  if (multiple >= 6) return '\u{1F525}' // fire
-  return '\u{1F4C8}' // chart increasing
-}
-
-const LAUNCHPAD_LABELS: Record<string, string> = {
-  noxa: 'NOXA',
-  odyssey: 'The Odyssey',
-}
+const LAUNCHPAD_LABELS: Record<string, string> = { noxa: 'NOXA', odyssey: 'The Odyssey' }
 
 export function dexScreenerUrl(token: string): string {
   return `https://dexscreener.com/robinhood/${token}`
@@ -62,54 +56,179 @@ export function explorerTokenUrl(token: string): string {
   return `${MAINNET_EXPLORER_URL}/token/${token}`
 }
 
+export function explorerTxUrl(hash: string): string {
+  return `${MAINNET_EXPLORER_URL}/tx/${hash}`
+}
+
+export function explorerAddressUrl(address: string): string {
+  return `${MAINNET_EXPLORER_URL}/address/${address}`
+}
+
 export function chartUrl(token: string): string {
   return `https://three.ws/markets/robinhood/coin/${token}`
 }
 
-/**
- * Render a spike alert as Telegram HTML, in the compact card layout:
- * headline (emoji, symbol, name), the spike line, a quoted stats block,
- * optional dev-sold warning, the copyable contract address, and a link row.
- */
-export function renderAlertHtml(a: SpikeAlert): string {
-  const symbol = a.symbol ? escapeHtml(a.symbol) : `${a.token.slice(0, 6)}…${a.token.slice(-4)}`
-  const name = a.name && a.name !== a.symbol ? ` <i>${escapeHtml(a.name)}</i>` : ''
+function emojiForSpike(multiple: number): string {
+  if (multiple >= 20) return '\u{1F4A5}'
+  if (multiple >= 10) return '\u{1F680}'
+  if (multiple >= 6) return '\u{1F525}'
+  return '\u{1F4C8}'
+}
 
-  const head = `${emojiFor(a.multiple)} <b>${symbol}</b>${name}`
-  const spike = `<b>${fmtMult(a.multiple)} volume</b> · ${fmtUsd(a.volumeUsd)} in 1m vs ${fmtUsd(a.baselinePerMin)}/min normal · Robinhood`
+/** `SYMBOL Name` headline, falling back to a shortened address. */
+function title(alert: Alert): string {
+  const symbol = alert.symbol ? escapeHtml(alert.symbol) : shortAddr(alert.token)
+  const name = alert.name && alert.name !== alert.symbol ? ` <i>${escapeHtml(alert.name)}</i>` : ''
+  return `<b>${symbol}</b>${name}`
+}
 
-  const priceParts = [`Price ${fmtPrice(a.priceUsd)}`]
-  if (a.d1m !== null) priceParts.push(`1m ${fmtPct(a.d1m)}`)
-  if (a.d5m !== null) priceParts.push(`5m ${fmtPct(a.d5m)}`)
-  if (a.d1h !== null) priceParts.push(`1h ${fmtPct(a.d1h)}`)
+/** The price/market lines shared by most cards, as blockquote content. */
+function statLines(context: MarketContext, extra: string[] = []): string[] {
+  const lines: string[] = []
+  if (context.priceUsd > 0) {
+    const parts = [`Price ${fmtPrice(context.priceUsd)}`]
+    if (context.d1m !== null) parts.push(`1m ${fmtPct(context.d1m)}`)
+    if (context.d5m !== null) parts.push(`5m ${fmtPct(context.d5m)}`)
+    if (context.d1h !== null) parts.push(`1h ${fmtPct(context.d1h)}`)
+    lines.push(parts.join('  '))
+  }
+  lines.push(...extra)
 
-  const statLines = [
-    priceParts.join('  '),
-    `Swaps ${a.swaps} (${fmtMult(a.swapsMultiple)} normal)  buys ${a.buys} / sells ${a.sells}`,
-  ]
-  const marketParts: string[] = []
-  if (a.mcapUsd !== null) marketParts.push(`MCap ${fmtUsd(a.mcapUsd)}`)
-  if (a.liquidityUsd !== null) marketParts.push(`Liquidity ${fmtUsd(a.liquidityUsd)}`)
-  if (a.holders !== null) marketParts.push(`Holders ${fmtInt(a.holders)}`)
-  if (marketParts.length > 0) statLines.push(marketParts.join('  '))
+  const market: string[] = []
+  if (context.mcapUsd !== null) market.push(`MCap ${fmtUsd(context.mcapUsd)}`)
+  if (context.liquidityUsd !== null) market.push(`Liquidity ${fmtUsd(context.liquidityUsd)}`)
+  if (context.holders !== null) market.push(`Holders ${fmtInt(context.holders)}`)
+  if (market.length > 0) lines.push(market.join('  '))
 
-  const originParts: string[] = []
-  if (a.ageS !== null) originParts.push(`Age ${fmtAge(a.ageS)}`)
-  if (a.launchpad) originParts.push(`Platform ${LAUNCHPAD_LABELS[a.launchpad] ?? a.launchpad}`)
-  if (originParts.length > 0) statLines.push(originParts.join('  '))
+  const origin: string[] = []
+  if (context.ageS !== null) origin.push(`Age ${fmtAge(context.ageS)}`)
+  if (context.launchpad) origin.push(`Platform ${LAUNCHPAD_LABELS[context.launchpad] ?? context.launchpad}`)
+  if (origin.length > 0) lines.push(origin.join('  '))
 
-  const warning = a.devSold === true ? '\n⚠️ dev sold' : ''
+  return lines
+}
 
-  const links = [
-    `<a href="${explorerTokenUrl(a.token)}">Scan</a>`,
-    `<a href="${dexScreenerUrl(a.token)}">DexScreener</a>`,
-    `<a href="${chartUrl(a.token)}">Chart</a>`,
-  ].join(' · ')
+function block(lines: string[]): string {
+  return lines.length > 0 ? `<blockquote>${lines.join('\n')}</blockquote>` : ''
+}
 
+function footer(alert: Alert, links: string[]): string {
+  return [`<code>${alert.token}</code>`, links.join(' · ')].join('\n')
+}
+
+function defaultLinks(token: string): string[] {
   return [
-    `${head}\n${spike}`,
-    `<blockquote>${statLines.join('\n')}</blockquote>${warning}`,
-    `<code>${a.token}</code>`,
-    links,
-  ].join('\n')
+    `<a href="${explorerTokenUrl(token)}">Scan</a>`,
+    `<a href="${dexScreenerUrl(token)}">DexScreener</a>`,
+    `<a href="${chartUrl(token)}">Chart</a>`,
+  ]
+}
+
+/** Render any alert as Telegram HTML. */
+export function renderAlertHtml(alert: Alert): string {
+  const warning = alert.context.devSold === true ? '\n⚠️ dev sold' : ''
+
+  switch (alert.kind) {
+    case 'spike': {
+      const head = `${emojiForSpike(alert.multiple)} ${title(alert)}`
+      const spike = `<b>${fmtMult(alert.multiple)} volume</b> · ${fmtUsd(alert.volumeUsd)} in 1m vs ${fmtUsd(
+        alert.baselinePerMin,
+      )}/min normal · Robinhood`
+      const swaps = `Swaps ${alert.swaps} (${fmtMult(alert.swapsMultiple)} normal)  buys ${alert.buys} / sells ${alert.sells}`
+      return [
+        `${head}\n${spike}`,
+        `${block(statLines(alert.context, [swaps]))}${warning}`,
+        footer(alert, defaultLinks(alert.token)),
+      ].join('\n')
+    }
+
+    case 'whale': {
+      const emoji = alert.side === 'buy' ? '\u{1F40B}' : '\u{1F4B8}'
+      const head = `${emoji} ${title(alert)}`
+      const line = `<b>${fmtUsd(alert.usd)} ${alert.side}</b> · ${
+        alert.venue === 'odyssey-curve' ? 'Odyssey curve' : 'Uniswap v3'
+      } · Robinhood`
+      const trader = alert.trader ? [`Trader ${shortAddr(alert.trader)}`] : []
+      return [
+        `${head}\n${line}`,
+        `${block(statLines(alert.context, trader))}${warning}`,
+        footer(alert, [
+          ...defaultLinks(alert.token),
+          `<a href="${explorerTxUrl(alert.txHash)}">Tx</a>`,
+        ]),
+      ].join('\n')
+    }
+
+    case 'launch': {
+      const head = `\u{1F331} <b>New launch</b> ${title(alert)}`
+      const line = `${escapeHtml(alert.launchpadName)} · Robinhood`
+      const lines = [
+        `Creator ${shortAddr(alert.creator)}`,
+        alert.pool ? `Pool ${shortAddr(alert.pool)}` : 'Trading on the curve until it graduates',
+      ]
+      return [`${head}\n${line}`, block(lines), footer(alert, defaultLinks(alert.token))].join('\n')
+    }
+
+    case 'graduation': {
+      const head = `\u{1F393} <b>Graduated</b> ${title(alert)}`
+      const line = 'The curve filled; liquidity migrated to a locked Uniswap v3 pool.'
+      return [
+        `${head}\n${line}`,
+        block([`Pool ${shortAddr(alert.pool)}`, ...statLines(alert.context)]),
+        footer(alert, defaultLinks(alert.token)),
+      ].join('\n')
+    }
+
+    case 'price_move': {
+      const up = alert.pct >= 0
+      const head = `${up ? '\u{1F4C8}' : '\u{1F4C9}'} ${title(alert)}`
+      const line = `<b>${fmtPct(alert.pct)} in ${alert.windowMinutes}m</b> · ${fmtPrice(alert.fromUsd)} to ${fmtPrice(
+        alert.toUsd,
+      )} · Robinhood`
+      return [
+        `${head}\n${line}`,
+        `${block(statLines(alert.context))}${warning}`,
+        footer(alert, defaultLinks(alert.token)),
+      ].join('\n')
+    }
+
+    case 'liquidity_pull': {
+      const head = `\u{1F6A8} <b>Liquidity pulled</b> ${title(alert)}`
+      const line = `<b>-${alert.droppedPct.toFixed(1)}%</b> · ${fmtUsd(alert.beforeUsd)} to ${fmtUsd(
+        alert.afterUsd,
+      )} · Robinhood`
+      return [
+        `${head}\n${line}`,
+        `${block(statLines(alert.context))}${warning}`,
+        footer(alert, defaultLinks(alert.token)),
+      ].join('\n')
+    }
+
+    case 'wallet_trade': {
+      const who = alert.walletLabel ? escapeHtml(alert.walletLabel) : shortAddr(alert.wallet)
+      const head = `\u{1F464} <b>${who}</b> ${alert.side === 'buy' ? 'bought' : 'sold'} ${title(alert)}`
+      const line = `<b>${fmtUsd(alert.usd)} ${alert.side}</b> · Robinhood`
+      return [
+        `${head}\n${line}`,
+        `${block(statLines(alert.context))}${warning}`,
+        footer(alert, [
+          ...defaultLinks(alert.token),
+          `<a href="${explorerAddressUrl(alert.wallet)}">Wallet</a>`,
+          `<a href="${explorerTxUrl(alert.txHash)}">Tx</a>`,
+        ]),
+      ].join('\n')
+    }
+
+    case 'performance': {
+      const head = `\u{1F3C6} ${title(alert)} hit <b>${fmtMult(alert.milestone)}</b>`
+      const line = `${fmtPrice(alert.entryPriceUsd)} to ${fmtPrice(alert.peakPriceUsd)} in ${fmtAge(
+        alert.elapsedS,
+      )} since the alert`
+      return [
+        `${head}\n${line}`,
+        block([`Peak ${fmtMult(alert.multiple)} from the alert price`, ...statLines(alert.context).slice(1)]),
+        footer(alert, defaultLinks(alert.token)),
+      ].join('\n')
+    }
+  }
 }

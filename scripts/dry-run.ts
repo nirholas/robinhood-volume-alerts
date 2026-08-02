@@ -29,7 +29,7 @@ logger.info({ minutes, spikeX, minVolumeUsd, minSwaps }, 'dry run starting')
 const app = await startApp({
   telegramToken: null,
   dbPath: process.env.DB_PATH?.trim() || './data/dry-run.db',
-  defaults: { spikeX, minVolumeUsd, minSwaps, newTokens: true },
+  defaults: { ...SETTING_DEFAULTS, spikeX, minVolumeUsd, minSwaps, newTokens: true },
 })
 
 setTimeout(

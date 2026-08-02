@@ -1,4 +1,6 @@
-/** Runtime configuration, resolved once at startup from the environment. */
+import { ALERT_KINDS, type AlertKind } from './engine/events.js'
+
+/** Per-chat tunables. Every field is settable from the Telegram keyboard. */
 export interface Defaults {
   /** Rolling-minute volume must be at least this many times the baseline. */
   spikeX: number
@@ -6,8 +8,16 @@ export interface Defaults {
   minVolumeUsd: number
   /** Ignore spikes with fewer swaps than this in the spiking minute. */
   minSwaps: number
-  /** Whether tokens younger than one baseline window alert at all. */
+  /** Whether tokens younger than an hour alert at all. */
   newTokens: boolean
+  /** Which alert families are delivered. */
+  kinds: AlertKind[]
+  /** Single-trade dollar floor for whale alerts. */
+  whaleMinUsd: number
+  /** Absolute percent move over 5 minutes that triggers a price alert. */
+  priceMovePct: number
+  /** Percent liquidity drop that triggers a rug warning. */
+  rugDropPct: number
 }
 
 export interface Config {
@@ -31,12 +41,18 @@ function num(value: string | undefined, fallback: number, name: string): number 
   return n
 }
 
-/** Sensitivity defaults for a chat that has never touched the keyboard. */
+/** Settings for a chat that has never touched the keyboard. */
 export const SETTING_DEFAULTS: Defaults = {
   spikeX: 4,
   minVolumeUsd: 3000,
   minSwaps: 10,
   newTokens: true,
+  // Wallet trades need a watchlist to fire, so enabling them by default costs
+  // nothing. Launches are the noisiest family, so they start off.
+  kinds: ALERT_KINDS.filter((k) => k !== 'launch'),
+  whaleMinUsd: 5000,
+  priceMovePct: 25,
+  rugDropPct: 40,
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

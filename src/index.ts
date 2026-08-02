@@ -10,7 +10,10 @@ import { TradeIngest } from './chain/ingest.js'
 import { LaunchTracker } from './chain/launches.js'
 import { Enricher } from './chain/enrich.js'
 import { VolumeTracker } from './engine/window.js'
-import { SpikeDetector, type SpikeAlert } from './engine/detector.js'
+import { SpikeDetector, type EmitAlert } from './engine/detector.js'
+import { LaunchpadDetectors, LiquidityMonitor, PriceMoveDetector, TradeDetectors } from './engine/detectors.js'
+import { PerformanceTracker } from './engine/performance.js'
+import type { Alert } from './engine/events.js'
 import { TelegramAlertBot } from './telegram/bot.js'
 import { renderAlertHtml } from './telegram/format.js'
 import { logger } from './logger.js'
@@ -22,6 +25,7 @@ export interface App {
   stop: () => Promise<void>
   detector: SpikeDetector
   ingest: TradeIngest
+  performance: PerformanceTracker
 }
 
 /**
@@ -40,23 +44,27 @@ export async function startApp(overrides: Partial<ReturnType<typeof loadConfig>>
   const meta = new TokenMetaCache(client, store)
   const enricher = new Enricher(client, store, ethPrice, meta)
   const tracker = new VolumeTracker(store)
-  const launches = new LaunchTracker(client, store)
+  const launchHistory = new LaunchTracker(client, store)
 
   const telegram = cfg.telegramToken ? new TelegramAlertBot(cfg.telegramToken, store, cfg) : null
   if (!telegram) {
     logger.warn('TELEGRAM_BOT_TOKEN is not set: alerts print to the console only')
   }
 
-  const deliver = async (alert: SpikeAlert): Promise<void> => {
-    logger.info(
-      { token: alert.token, symbol: alert.symbol, multiple: Number(alert.multiple.toFixed(1)), volumeUsd: Math.round(alert.volumeUsd) },
-      'spike detected',
-    )
-    if (telegram) await telegram.deliver(alert)
-    else console.log(`\n${renderAlertHtml(alert).replace(/<[^>]+>/g, '')}\n`)
+  const performance = new PerformanceTracker(store, meta, async (alert) => void (await emit(alert)))
+
+  const emit: EmitAlert = async (alert: Alert): Promise<void> => {
+    logger.info({ kind: alert.kind, token: alert.token, symbol: alert.symbol }, 'alert')
+    const recipients = telegram ? await telegram.deliver(alert) : ['console']
+    if (!telegram) console.log(`\n${renderAlertHtml(alert).replace(/<[^>]+>/g, '')}\n`)
+    performance.track(alert, recipients)
   }
 
-  const detector = new SpikeDetector(store, tracker, enricher, meta, cfg, deliver)
+  const spike = new SpikeDetector(store, tracker, enricher, meta, cfg, emit)
+  const trades = new TradeDetectors(store, meta, enricher, emit)
+  const priceMoves = new PriceMoveDetector(store, meta, enricher, cfg.defaults.priceMovePct, emit)
+  const liquidity = new LiquidityMonitor(client, store, ethPrice, meta, enricher, cfg.defaults.rugDropPct, emit)
+  const launchpads = new LaunchpadDetectors(client, store, meta, emit)
 
   const head = await client.public.getBlockNumber()
   const backfillBlocks = BigInt(cfg.backfillMinutes) * BLOCKS_PER_MINUTE
@@ -66,40 +74,74 @@ export async function startApp(overrides: Partial<ReturnType<typeof loadConfig>>
     'starting ingest with baseline backfill',
   )
 
-  const ingest = new TradeIngest(client, pools, ethPrice, (trade) => tracker.add(trade), {
-    fromBlock,
-    onCaughtUp: () => {
-      detector.live = true
-      logger.info('backfill caught up to chain head, spike detection is live')
+  const ingest = new TradeIngest(
+    client,
+    pools,
+    ethPrice,
+    (trade) => {
+      tracker.add(trade)
+      // Trade-level detectors only run on live trades: replaying the
+      // backfill would alert on whale prints that happened an hour ago.
+      if (spike.live) trades.onTrade(trade)
     },
-    onError: (err) => logger.warn({ err: err.message }, 'ingest error'),
-  })
+    {
+      fromBlock,
+      onCaughtUp: () => {
+        spike.live = true
+        launchpads.start()
+        logger.info('backfill caught up to chain head, detection is live')
+      },
+      onError: (err) => logger.warn({ err: err.message }, 'ingest error'),
+    },
+  )
 
   ingest.start()
-  await launches.start()
+  await launchHistory.start()
   if (telegram) await telegram.start()
 
   const evalTimer = setInterval(() => {
-    void detector.tick().catch((err) => logger.error({ err: String(err) }, 'detector tick failed'))
+    const nowS = Math.floor(Date.now() / 1000)
+    void spike
+      .tick(nowS)
+      .then(() => (spike.live ? priceMoves.evaluate(tracker.activeTokens(nowS, 300), nowS) : undefined))
+      .catch((err) => logger.error({ err: String(err) }, 'detector tick failed'))
   }, cfg.evalIntervalS * 1000)
+
+  const slowTimer = setInterval(() => {
+    if (!spike.live) return
+    void liquidity.poll().catch((err) => logger.warn({ err: String(err) }, 'liquidity poll failed'))
+    void performance.poll().catch((err) => logger.warn({ err: String(err) }, 'performance poll failed'))
+  }, 60_000)
 
   const statsTimer = setInterval(() => {
     logger.info(
-      { trades: ingest.tradesIngested, lastBlock: String(ingest.lastBlock), alerts: detector.alertsEmitted },
+      {
+        trades: ingest.tradesIngested,
+        lastBlock: String(ingest.lastBlock),
+        spikes: spike.alertsEmitted,
+        whales: trades.whaleAlerts,
+        wallets: trades.walletAlerts,
+        priceMoves: priceMoves.alerts,
+        rugs: liquidity.alerts,
+        launches: launchpads.launches,
+        graduations: launchpads.graduations,
+        milestones: performance.milestonesEmitted,
+      },
       'pipeline stats',
     )
   }, 60_000)
 
   const stop = async (): Promise<void> => {
     clearInterval(evalTimer)
+    clearInterval(slowTimer)
     clearInterval(statsTimer)
     ingest.stop()
-    launches.stop()
+    launchpads.stop()
     if (telegram) await telegram.stop()
     store.close()
   }
 
-  return { stop, detector, ingest }
+  return { stop, detector: spike, ingest, performance }
 }
 
 const isMain = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '')

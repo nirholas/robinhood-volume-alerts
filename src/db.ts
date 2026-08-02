@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
 import type { Defaults } from './config.js'
+import { ALERT_KINDS, isAlertKind, type AlertKind } from './engine/events.js'
 
 /** Per-chat sensitivity settings, as stored. */
 export interface ChatSettings extends Defaults {
@@ -40,6 +41,50 @@ export interface TokenRow {
   creator: string | null
   launchpad: string | null
   firstSeenS: number | null
+}
+
+/** A wallet or token a chat asked to follow. */
+export interface WatchRow {
+  chatId: string
+  kind: 'wallet' | 'token'
+  target: string
+  label: string | null
+  createdAt: number
+}
+
+/** An alert whose subsequent price action is being tracked. */
+export interface TrackedAlert {
+  id: number
+  token: string
+  sourceKind: AlertKind
+  alertedAt: number
+  entryPrice: number
+  peakPrice: number
+  peakAt: number
+  lastMilestone: number
+  closed: number
+}
+
+/** One row of the /top leaderboard. */
+export interface MoverRow {
+  token: string
+  symbol: string | null
+  volumeUsd: number
+  swaps: number
+  firstPrice: number
+  lastPrice: number
+  pct: number
+}
+
+/** Aggregate performance of tracked alerts, for /scorecard. */
+export interface Scorecard {
+  tracked: number
+  settled: number
+  hit2x: number
+  hit5x: number
+  hit10x: number
+  medianPeak: number
+  best: { token: string; symbol: string | null; multiple: number } | null
 }
 
 export class Store {
@@ -101,26 +146,88 @@ export class Store {
         launchpad    TEXT,
         first_seen_s INTEGER
       );
-      CREATE TABLE IF NOT EXISTS cooldowns (
-        chat_id     TEXT NOT NULL,
-        token       TEXT NOT NULL,
-        last_sent_s INTEGER NOT NULL,
-        PRIMARY KEY (chat_id, token)
-      );
       CREATE TABLE IF NOT EXISTS app_state (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS alert_cooldowns (
+        chat_id     TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        token       TEXT NOT NULL,
+        last_sent_s INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, kind, token)
+      );
+      CREATE TABLE IF NOT EXISTS watches (
+        chat_id    TEXT NOT NULL,
+        kind       TEXT NOT NULL,
+        target     TEXT NOT NULL,
+        label      TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, kind, target)
+      );
+      CREATE INDEX IF NOT EXISTS idx_watches_target ON watches (kind, target);
+      CREATE TABLE IF NOT EXISTS tracked_alerts (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        token          TEXT NOT NULL,
+        source_kind    TEXT NOT NULL,
+        alerted_at     INTEGER NOT NULL,
+        entry_price    REAL NOT NULL,
+        peak_price     REAL NOT NULL,
+        peak_at        INTEGER NOT NULL,
+        last_milestone REAL NOT NULL DEFAULT 1,
+        closed         INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_tracked_open ON tracked_alerts (closed);
+      CREATE TABLE IF NOT EXISTS alert_recipients (
+        tracked_id INTEGER NOT NULL,
+        chat_id    TEXT NOT NULL,
+        PRIMARY KEY (tracked_id, chat_id)
+      );
     `)
+
+    // Columns added after the first release: applied in place so an existing
+    // database keeps its baselines and subscriber settings.
+    this.addColumn('chats', 'kinds', `TEXT NOT NULL DEFAULT '${ALERT_KINDS.join(',')}'`)
+    this.addColumn('chats', 'whale_min_usd', 'REAL NOT NULL DEFAULT 5000')
+    this.addColumn('chats', 'price_move_pct', 'REAL NOT NULL DEFAULT 25')
+    this.addColumn('chats', 'rug_drop_pct', 'REAL NOT NULL DEFAULT 40')
+
+    // The pre-kind cooldown table carried spike cooldowns only.
+    const legacy = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cooldowns'")
+      .get() as { name: string } | undefined
+    if (legacy) {
+      this.db.exec(`
+        INSERT OR IGNORE INTO alert_cooldowns (chat_id, kind, token, last_sent_s)
+          SELECT chat_id, 'spike', token, last_sent_s FROM cooldowns;
+        DROP TABLE cooldowns;
+      `)
+    }
+  }
+
+  private addColumn(table: string, column: string, ddl: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`)
+    }
   }
 
   // ---- chats ---------------------------------------------------------------
 
   getChat(chatId: string): ChatSettings {
-    const row = this.db
-      .prepare('SELECT * FROM chats WHERE chat_id = ?')
-      .get(chatId) as
-      | { chat_id: string; spike_x: number; min_volume_usd: number; min_swaps: number; new_tokens: number; paused: number }
+    const row = this.db.prepare('SELECT * FROM chats WHERE chat_id = ?').get(chatId) as
+      | {
+          chat_id: string
+          spike_x: number
+          min_volume_usd: number
+          min_swaps: number
+          new_tokens: number
+          paused: number
+          kinds: string
+          whale_min_usd: number
+          price_move_pct: number
+          rug_drop_pct: number
+        }
       | undefined
     if (!row) return { chatId, ...this.defaults, paused: false }
     return {
@@ -130,6 +237,10 @@ export class Store {
       minSwaps: row.min_swaps,
       newTokens: row.new_tokens === 1,
       paused: row.paused === 1,
+      kinds: parseKinds(row.kinds, this.defaults.kinds),
+      whaleMinUsd: row.whale_min_usd,
+      priceMovePct: row.price_move_pct,
+      rugDropPct: row.rug_drop_pct,
     }
   }
 
@@ -137,11 +248,15 @@ export class Store {
     const now = Math.floor(Date.now() / 1000)
     this.db
       .prepare(
-        `INSERT INTO chats (chat_id, spike_x, min_volume_usd, min_swaps, new_tokens, paused, created_at, updated_at)
-         VALUES (@chatId, @spikeX, @minVolumeUsd, @minSwaps, @newTokens, @paused, @now, @now)
+        `INSERT INTO chats (chat_id, spike_x, min_volume_usd, min_swaps, new_tokens, paused,
+                            kinds, whale_min_usd, price_move_pct, rug_drop_pct, created_at, updated_at)
+         VALUES (@chatId, @spikeX, @minVolumeUsd, @minSwaps, @newTokens, @paused,
+                 @kinds, @whaleMinUsd, @priceMovePct, @rugDropPct, @now, @now)
          ON CONFLICT (chat_id) DO UPDATE SET
            spike_x = @spikeX, min_volume_usd = @minVolumeUsd, min_swaps = @minSwaps,
-           new_tokens = @newTokens, paused = @paused, updated_at = @now`,
+           new_tokens = @newTokens, paused = @paused, kinds = @kinds,
+           whale_min_usd = @whaleMinUsd, price_move_pct = @priceMovePct,
+           rug_drop_pct = @rugDropPct, updated_at = @now`,
       )
       .run({
         chatId: settings.chatId,
@@ -150,6 +265,10 @@ export class Store {
         minSwaps: settings.minSwaps,
         newTokens: settings.newTokens ? 1 : 0,
         paused: settings.paused ? 1 : 0,
+        kinds: settings.kinds.join(','),
+        whaleMinUsd: settings.whaleMinUsd,
+        priceMovePct: settings.priceMovePct,
+        rugDropPct: settings.rugDropPct,
         now,
       })
   }
@@ -157,12 +276,6 @@ export class Store {
   listActiveChats(): ChatSettings[] {
     const rows = this.db.prepare('SELECT chat_id FROM chats WHERE paused = 0').all() as { chat_id: string }[]
     return rows.map((r) => this.getChat(r.chat_id))
-  }
-
-  deleteChat(chatId: string): void {
-    this.db.prepare('DELETE FROM chats WHERE chat_id = ?').run(chatId)
-    this.db.prepare('DELETE FROM mutes WHERE chat_id = ?').run(chatId)
-    this.db.prepare('DELETE FROM cooldowns WHERE chat_id = ?').run(chatId)
   }
 
   // ---- mutes ---------------------------------------------------------------
@@ -191,9 +304,57 @@ export class Store {
     return rows.map((r) => r.token)
   }
 
+  // ---- watches -------------------------------------------------------------
+
+  addWatch(chatId: string, kind: 'wallet' | 'token', target: string, label: string | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO watches (chat_id, kind, target, label, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (chat_id, kind, target) DO UPDATE SET label = COALESCE(excluded.label, label)`,
+      )
+      .run(chatId, kind, target.toLowerCase(), label, Math.floor(Date.now() / 1000))
+  }
+
+  removeWatch(chatId: string, kind: 'wallet' | 'token', target: string): boolean {
+    const info = this.db
+      .prepare('DELETE FROM watches WHERE chat_id = ? AND kind = ? AND target = ?')
+      .run(chatId, kind, target.toLowerCase())
+    return info.changes > 0
+  }
+
+  listWatches(chatId: string, kind?: 'wallet' | 'token'): WatchRow[] {
+    const rows = (
+      kind
+        ? this.db.prepare('SELECT * FROM watches WHERE chat_id = ? AND kind = ? ORDER BY created_at DESC').all(chatId, kind)
+        : this.db.prepare('SELECT * FROM watches WHERE chat_id = ? ORDER BY created_at DESC').all(chatId)
+    ) as { chat_id: string; kind: string; target: string; label: string | null; created_at: number }[]
+    return rows.map((r) => ({
+      chatId: r.chat_id,
+      kind: r.kind === 'wallet' ? 'wallet' : 'token',
+      target: r.target,
+      label: r.label,
+      createdAt: r.created_at,
+    }))
+  }
+
+  /** Every chat watching `target`, with the label each gave it. */
+  watchersOf(kind: 'wallet' | 'token', target: string): { chatId: string; label: string | null }[] {
+    const rows = this.db
+      .prepare('SELECT chat_id, label FROM watches WHERE kind = ? AND target = ?')
+      .all(kind, target.toLowerCase()) as { chat_id: string; label: string | null }[]
+    return rows.map((r) => ({ chatId: r.chat_id, label: r.label }))
+  }
+
+  /** All distinct watched targets of a kind, for the in-memory hot set. */
+  allWatchTargets(kind: 'wallet' | 'token'): string[] {
+    const rows = this.db.prepare('SELECT DISTINCT target FROM watches WHERE kind = ?').all(kind) as {
+      target: string
+    }[]
+    return rows.map((r) => r.target)
+  }
+
   // ---- minute buckets ------------------------------------------------------
 
-  /** Accumulate a closed minute bucket (idempotent re-adds merge). */
   addBucket(token: string, minute: number, b: MinuteBucket): void {
     this.db
       .prepare(
@@ -209,10 +370,11 @@ export class Store {
       .run(token.toLowerCase(), minute, b.volumeUsd, b.swaps, b.buys, b.sells, b.closePrice)
   }
 
-  /** Buckets in [fromMinute, toMinute], keyed by minute. Missing minutes are absent. */
   getBuckets(token: string, fromMinute: number, toMinute: number): Map<number, MinuteBucket> {
     const rows = this.db
-      .prepare('SELECT minute, volume_usd, swaps, buys, sells, close_price FROM minute_buckets WHERE token = ? AND minute BETWEEN ? AND ?')
+      .prepare(
+        'SELECT minute, volume_usd, swaps, buys, sells, close_price FROM minute_buckets WHERE token = ? AND minute BETWEEN ? AND ?',
+      )
       .all(token.toLowerCase(), fromMinute, toMinute) as {
       minute: number
       volume_usd: number
@@ -223,24 +385,48 @@ export class Store {
     }[]
     const map = new Map<number, MinuteBucket>()
     for (const r of rows) {
-      map.set(r.minute, { volumeUsd: r.volume_usd, swaps: r.swaps, buys: r.buys, sells: r.sells, closePrice: r.close_price })
+      map.set(r.minute, {
+        volumeUsd: r.volume_usd,
+        swaps: r.swaps,
+        buys: r.buys,
+        sells: r.sells,
+        closePrice: r.close_price,
+      })
     }
     return map
   }
 
-  /** Latest close price at or before `minute`, looking back up to `lookback` minutes. */
   closePriceAtOrBefore(token: string, minute: number, lookback: number): number | null {
     const row = this.db
-      .prepare('SELECT close_price FROM minute_buckets WHERE token = ? AND minute <= ? AND minute >= ? ORDER BY minute DESC LIMIT 1')
+      .prepare(
+        'SELECT close_price FROM minute_buckets WHERE token = ? AND minute <= ? AND minute >= ? ORDER BY minute DESC LIMIT 1',
+      )
       .get(token.toLowerCase(), minute, minute - lookback) as { close_price: number } | undefined
     return row ? row.close_price : null
   }
 
-  /** Earliest minute we have ever seen a bucket for this token, or null. */
-  earliestBucketMinute(token: string): number | null {
+  /** Most recent close price for a token, at or after `sinceMinute`. */
+  latestPrice(token: string, sinceMinute: number): number | null {
     const row = this.db
-      .prepare('SELECT MIN(minute) AS m FROM minute_buckets WHERE token = ?')
-      .get(token.toLowerCase()) as { m: number | null }
+      .prepare('SELECT close_price FROM minute_buckets WHERE token = ? AND minute >= ? ORDER BY minute DESC LIMIT 1')
+      .get(token.toLowerCase(), sinceMinute) as { close_price: number } | undefined
+    return row ? row.close_price : null
+  }
+
+  /** Highest close price seen in a minute range, for peak tracking. */
+  peakPrice(token: string, fromMinute: number, toMinute: number): { price: number; minute: number } | null {
+    const row = this.db
+      .prepare(
+        'SELECT close_price, minute FROM minute_buckets WHERE token = ? AND minute BETWEEN ? AND ? ORDER BY close_price DESC LIMIT 1',
+      )
+      .get(token.toLowerCase(), fromMinute, toMinute) as { close_price: number; minute: number } | undefined
+    return row ? { price: row.close_price, minute: row.minute } : null
+  }
+
+  earliestBucketMinute(token: string): number | null {
+    const row = this.db.prepare('SELECT MIN(minute) AS m FROM minute_buckets WHERE token = ?').get(token.toLowerCase()) as {
+      m: number | null
+    }
     return row.m
   }
 
@@ -248,11 +434,61 @@ export class Store {
     this.db.prepare('DELETE FROM minute_buckets WHERE minute < ?').run(beforeMinute)
   }
 
+  /**
+   * Tokens that traded in the window, heaviest first. Powers /top and the
+   * liquidity monitor's candidate set.
+   */
+  topMovers(fromMinute: number, toMinute: number, limit: number): MoverRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT b.token AS token,
+                t.symbol AS symbol,
+                SUM(b.volume_usd) AS volume_usd,
+                SUM(b.swaps) AS swaps,
+                (SELECT close_price FROM minute_buckets f WHERE f.token = b.token AND f.minute BETWEEN ? AND ? ORDER BY f.minute ASC LIMIT 1) AS first_price,
+                (SELECT close_price FROM minute_buckets l WHERE l.token = b.token AND l.minute BETWEEN ? AND ? ORDER BY l.minute DESC LIMIT 1) AS last_price
+         FROM minute_buckets b
+         LEFT JOIN tokens t ON t.token = b.token
+         WHERE b.minute BETWEEN ? AND ?
+         GROUP BY b.token
+         ORDER BY volume_usd DESC
+         LIMIT ?`,
+      )
+      .all(fromMinute, toMinute, fromMinute, toMinute, fromMinute, toMinute, limit) as {
+      token: string
+      symbol: string | null
+      volume_usd: number
+      swaps: number
+      first_price: number | null
+      last_price: number | null
+    }[]
+    return rows.map((r) => {
+      const first = r.first_price ?? 0
+      const last = r.last_price ?? 0
+      return {
+        token: r.token,
+        symbol: r.symbol,
+        volumeUsd: r.volume_usd,
+        swaps: r.swaps,
+        firstPrice: first,
+        lastPrice: last,
+        pct: first > 0 && last > 0 ? ((last - first) / first) * 100 : 0,
+      }
+    })
+  }
+
   // ---- pools ---------------------------------------------------------------
 
   getPool(pool: string): PoolRow | null {
     const row = this.db.prepare('SELECT * FROM pools WHERE pool = ?').get(pool.toLowerCase()) as
-      | { pool: string; token: string | null; quote: string | null; token_is0: number; decimals_token: number; decimals_quote: number }
+      | {
+          pool: string
+          token: string | null
+          quote: string | null
+          token_is0: number
+          decimals_token: number
+          decimals_quote: number
+        }
       | undefined
     if (!row) return null
     return {
@@ -271,7 +507,14 @@ export class Store {
         `INSERT OR REPLACE INTO pools (pool, token, quote, token_is0, decimals_token, decimals_quote)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.pool.toLowerCase(), row.token?.toLowerCase() ?? null, row.quote, row.tokenIs0, row.decimalsToken, row.decimalsQuote)
+      .run(
+        row.pool.toLowerCase(),
+        row.token?.toLowerCase() ?? null,
+        row.quote,
+        row.tokenIs0,
+        row.decimalsToken,
+        row.decimalsQuote,
+      )
   }
 
   poolsForToken(token: string): PoolRow[] {
@@ -293,11 +536,44 @@ export class Store {
     }))
   }
 
+  /** Pools for many tokens at once, for the batched liquidity poll. */
+  poolsForTokens(tokens: string[]): PoolRow[] {
+    if (tokens.length === 0) return []
+    const placeholders = tokens.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`SELECT * FROM pools WHERE token IN (${placeholders}) AND quote IS NOT NULL`)
+      .all(...tokens.map((t) => t.toLowerCase())) as {
+      pool: string
+      token: string | null
+      quote: string | null
+      token_is0: number
+      decimals_token: number
+      decimals_quote: number
+    }[]
+    return rows.map((row) => ({
+      pool: row.pool,
+      token: row.token,
+      quote: row.quote,
+      tokenIs0: row.token_is0,
+      decimalsToken: row.decimals_token,
+      decimalsQuote: row.decimals_quote,
+    }))
+  }
+
   // ---- tokens --------------------------------------------------------------
 
   getToken(token: string): TokenRow | null {
     const row = this.db.prepare('SELECT * FROM tokens WHERE token = ?').get(token.toLowerCase()) as
-      | { token: string; symbol: string | null; name: string | null; decimals: number | null; total_supply: string | null; creator: string | null; launchpad: string | null; first_seen_s: number | null }
+      | {
+          token: string
+          symbol: string | null
+          name: string | null
+          decimals: number | null
+          total_supply: string | null
+          creator: string | null
+          launchpad: string | null
+          first_seen_s: number | null
+        }
       | undefined
     if (!row) return null
     return {
@@ -312,7 +588,6 @@ export class Store {
     }
   }
 
-  /** Merge non-null fields into the token row; first_seen_s keeps the minimum. */
   upsertToken(partial: Partial<TokenRow> & { token: string }): void {
     this.db
       .prepare(
@@ -343,25 +618,133 @@ export class Store {
       })
   }
 
-  // ---- cooldowns -------------------------------------------------------------
+  // ---- cooldowns -----------------------------------------------------------
 
-  lastAlertS(chatId: string, token: string): number | null {
+  lastAlertS(chatId: string, kind: AlertKind, token: string): number | null {
     const row = this.db
-      .prepare('SELECT last_sent_s FROM cooldowns WHERE chat_id = ? AND token = ?')
-      .get(chatId, token.toLowerCase()) as { last_sent_s: number } | undefined
+      .prepare('SELECT last_sent_s FROM alert_cooldowns WHERE chat_id = ? AND kind = ? AND token = ?')
+      .get(chatId, kind, token.toLowerCase()) as { last_sent_s: number } | undefined
     return row ? row.last_sent_s : null
   }
 
-  setLastAlert(chatId: string, token: string, atS: number): void {
+  setLastAlert(chatId: string, kind: AlertKind, token: string, atS: number): void {
     this.db
       .prepare(
-        `INSERT INTO cooldowns (chat_id, token, last_sent_s) VALUES (?, ?, ?)
-         ON CONFLICT (chat_id, token) DO UPDATE SET last_sent_s = excluded.last_sent_s`,
+        `INSERT INTO alert_cooldowns (chat_id, kind, token, last_sent_s) VALUES (?, ?, ?, ?)
+         ON CONFLICT (chat_id, kind, token) DO UPDATE SET last_sent_s = excluded.last_sent_s`,
       )
-      .run(chatId, token.toLowerCase(), atS)
+      .run(chatId, kind, token.toLowerCase(), atS)
   }
 
-  // ---- app state -------------------------------------------------------------
+  // ---- tracked alerts (performance) ----------------------------------------
+
+  /** Start tracking an alert's subsequent price action. Returns its id. */
+  trackAlert(token: string, sourceKind: AlertKind, atS: number, entryPrice: number): number {
+    const info = this.db
+      .prepare(
+        `INSERT INTO tracked_alerts (token, source_kind, alerted_at, entry_price, peak_price, peak_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(token.toLowerCase(), sourceKind, atS, entryPrice, entryPrice, atS)
+    return Number(info.lastInsertRowid)
+  }
+
+  addAlertRecipient(trackedId: number, chatId: string): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO alert_recipients (tracked_id, chat_id) VALUES (?, ?)')
+      .run(trackedId, chatId)
+  }
+
+  recipientsOf(trackedId: number): string[] {
+    const rows = this.db.prepare('SELECT chat_id FROM alert_recipients WHERE tracked_id = ?').all(trackedId) as {
+      chat_id: string
+    }[]
+    return rows.map((r) => r.chat_id)
+  }
+
+  openTrackedAlerts(): TrackedAlert[] {
+    const rows = this.db.prepare('SELECT * FROM tracked_alerts WHERE closed = 0').all() as {
+      id: number
+      token: string
+      source_kind: string
+      alerted_at: number
+      entry_price: number
+      peak_price: number
+      peak_at: number
+      last_milestone: number
+      closed: number
+    }[]
+    return rows.map((r) => ({
+      id: r.id,
+      token: r.token,
+      sourceKind: isAlertKind(r.source_kind) ? r.source_kind : 'spike',
+      alertedAt: r.alerted_at,
+      entryPrice: r.entry_price,
+      peakPrice: r.peak_price,
+      peakAt: r.peak_at,
+      lastMilestone: r.last_milestone,
+      closed: r.closed,
+    }))
+  }
+
+  updateTracked(id: number, peakPrice: number, peakAt: number, lastMilestone: number): void {
+    this.db
+      .prepare('UPDATE tracked_alerts SET peak_price = ?, peak_at = ?, last_milestone = ? WHERE id = ?')
+      .run(peakPrice, peakAt, lastMilestone, id)
+  }
+
+  closeTracked(id: number): void {
+    this.db.prepare('UPDATE tracked_alerts SET closed = 1 WHERE id = ?').run(id)
+  }
+
+  /** Whether this token already has an open tracker, to avoid duplicates. */
+  hasOpenTracker(token: string): boolean {
+    return (
+      this.db.prepare('SELECT 1 FROM tracked_alerts WHERE token = ? AND closed = 0').get(token.toLowerCase()) !==
+      undefined
+    )
+  }
+
+  /**
+   * How the bot's own alerts have performed. Only settled (closed) trackers
+   * count toward the hit rates, so an in-flight call cannot flatter the
+   * numbers.
+   */
+  scorecard(sinceS: number): Scorecard {
+    const rows = this.db
+      .prepare(
+        `SELECT a.token AS token, t.symbol AS symbol, a.entry_price AS entry, a.peak_price AS peak, a.closed AS closed
+         FROM tracked_alerts a LEFT JOIN tokens t ON t.token = a.token
+         WHERE a.alerted_at >= ?`,
+      )
+      .all(sinceS) as { token: string; symbol: string | null; entry: number; peak: number; closed: number }[]
+
+    const multiples: number[] = []
+    let settled = 0
+    let best: Scorecard['best'] = null
+    for (const r of rows) {
+      if (r.entry <= 0) continue
+      const multiple = r.peak / r.entry
+      if (r.closed === 1) {
+        settled++
+        multiples.push(multiple)
+      }
+      if (!best || multiple > best.multiple) best = { token: r.token, symbol: r.symbol, multiple }
+    }
+    const sorted = [...multiples].sort((a, b) => a - b)
+    const median = sorted.length === 0 ? 0 : (sorted[Math.floor((sorted.length - 1) / 2)] ?? 0)
+    return {
+      tracked: rows.length,
+      settled,
+      hit2x: multiples.filter((m) => m >= 2).length,
+      hit5x: multiples.filter((m) => m >= 5).length,
+      hit10x: multiples.filter((m) => m >= 10).length,
+      medianPeak: median,
+      best,
+    }
+  }
+
+  // ---- app state -----------------------------------------------------------
 
   getState(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM app_state WHERE key = ?').get(key) as { value: string } | undefined
@@ -377,4 +760,12 @@ export class Store {
   close(): void {
     this.db.close()
   }
+}
+
+function parseKinds(csv: string, fallback: AlertKind[]): AlertKind[] {
+  const parsed = csv
+    .split(',')
+    .map((s) => s.trim())
+    .filter(isAlertKind)
+  return parsed.length > 0 ? parsed : fallback
 }

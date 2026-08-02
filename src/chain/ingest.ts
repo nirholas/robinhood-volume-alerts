@@ -19,6 +19,14 @@ export interface Trade {
   blockNumber: bigint
   txHash: Hash
   venue: 'uniswap-v3' | 'odyssey-curve'
+  /**
+   * Addresses this trade can be attributed to, lowercase. For a Uniswap swap
+   * these are the event's `sender` (usually the router) and `recipient`
+   * (usually the trader); for a curve trade it is the trader. Wallet watches
+   * match against this set, which catches direct swaps and the common router
+   * paths where the user receives the output.
+   */
+  parties: string[]
 }
 
 export interface IngestOptions {
@@ -58,10 +66,15 @@ const ODYSSEY_FACTORIES: Address[] = [
  * negligible for one-minute bucketing.
  */
 export class TradeIngest {
+  /** Smallest span worth splitting down to before giving up on a range. */
+  private static readonly MIN_CHUNK = 25n
   private cursor: bigint | null
   private stopped = false
   private timer: ReturnType<typeof setTimeout> | null = null
   private caughtUp = false
+  /** Current span per getLogs request; shrinks on a provider result cap. */
+  private chunk: bigint
+  private readonly maxChunk: bigint
   /** Diagnostics. */
   tradesIngested = 0
   lastBlock: bigint = 0n
@@ -74,6 +87,8 @@ export class TradeIngest {
     private readonly options: IngestOptions = {},
   ) {
     this.cursor = options.fromBlock ?? null
+    this.maxChunk = options.chunkSize ?? 3000n
+    this.chunk = this.maxChunk
   }
 
   start(): void {
@@ -93,7 +108,6 @@ export class TradeIngest {
 
   private async tick(): Promise<void> {
     if (this.stopped) return
-    const chunk = this.options.chunkSize ?? 3000n
     try {
       const head = await this.client.public.getBlockNumber()
       const safeHead = head > 1n ? head - 1n : 0n
@@ -102,13 +116,14 @@ export class TradeIngest {
       let from: bigint = this.cursor
       while (from <= safeHead) {
         if (this.stopped) return
-        const to: bigint = from + chunk - 1n > safeHead ? safeHead : from + chunk - 1n
+        const to: bigint = from + this.chunk - 1n > safeHead ? safeHead : from + this.chunk - 1n
         await this.processRange(from, to)
         // Advance only after full delivery; an error above leaves the cursor
         // on the failed range so the next tick retries it.
         this.cursor = to + 1n
         this.lastBlock = to
         from = to + 1n
+        this.growChunk()
       }
       if (!this.caughtUp) {
         this.caughtUp = true
@@ -123,13 +138,61 @@ export class TradeIngest {
     }
   }
 
+  /**
+   * Providers cap how many logs one `eth_getLogs` may return (10 000 on the
+   * public Robinhood Chain RPC). A busy chunk trips that cap, and because the
+   * cursor only advances after a range is delivered, an uncaught cap error
+   * stalls ingest forever on the same range. So the cap is treated as a
+   * routing signal, not a failure: the range is split in half and retried,
+   * recursively, and the running chunk size shrinks so the next ranges do not
+   * repeat the round trip. It grows back once ranges start succeeding again.
+   */
+  private isResultCapError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return /exceeds limit|more than \d+ results|too many results|query returned more than|limit exceeded/i.test(message)
+  }
+
+  private shrinkChunk(): void {
+    const next = this.chunk / 2n
+    this.chunk = next < TradeIngest.MIN_CHUNK ? TradeIngest.MIN_CHUNK : next
+  }
+
+  private growChunk(): void {
+    if (this.chunk >= this.maxChunk) return
+    const next = this.chunk + this.chunk / 4n + 1n
+    this.chunk = next > this.maxChunk ? this.maxChunk : next
+  }
+
+  private async collectLogs(from: bigint, to: bigint): Promise<{ swaps: Log[]; curves: Log[] }> {
+    try {
+      const [swaps, curves] = await Promise.all([
+        this.client.public.getLogs({ event: uniswapV3SwapEvent, fromBlock: from, toBlock: to }),
+        this.client.public.getLogs({
+          address: ODYSSEY_FACTORIES,
+          event: odysseyTradedEvent,
+          fromBlock: from,
+          toBlock: to,
+        }),
+      ])
+      return { swaps: swaps as unknown as Log[], curves: curves as unknown as Log[] }
+    } catch (error) {
+      if (!this.isResultCapError(error) || to <= from) throw error
+      this.shrinkChunk()
+      const mid = from + (to - from) / 2n
+      logger.debug({ from: String(from), to: String(to) }, 'log query hit the provider result cap, splitting the range')
+      const left = await this.collectLogs(from, mid)
+      const right = await this.collectLogs(mid + 1n, to)
+      return { swaps: [...left.swaps, ...right.swaps], curves: [...left.curves, ...right.curves] }
+    }
+  }
+
   private async processRange(from: bigint, to: bigint): Promise<void> {
-    const [swapLogs, curveLogs, fromBlock, toBlock] = await Promise.all([
-      this.client.public.getLogs({ event: uniswapV3SwapEvent, fromBlock: from, toBlock: to }),
-      this.client.public.getLogs({ address: ODYSSEY_FACTORIES, event: odysseyTradedEvent, fromBlock: from, toBlock: to }),
+    const [logs, fromBlock, toBlock] = await Promise.all([
+      this.collectLogs(from, to),
       this.client.public.getBlock({ blockNumber: from }),
       to === from ? null : this.client.public.getBlock({ blockNumber: to }),
     ])
+    const { swaps: swapLogs, curves: curveLogs } = logs
     const tsOf = makeTimestampInterpolator(from, Number(fromBlock.timestamp), to, Number((toBlock ?? fromBlock).timestamp))
 
     const eth = (await this.ethPrice.get()) ?? this.ethPrice.lastKnown
@@ -152,10 +215,16 @@ export class TradeIngest {
 
   private async decodeSwap(log: Log, tsOf: (block: bigint) => number, eth: number | null): Promise<Trade | null> {
     if (!log.address || log.blockNumber === null || log.transactionHash === null) return null
-    let args: { amount0: bigint; amount1: bigint; sqrtPriceX96: bigint }
+    let args: { amount0: bigint; amount1: bigint; sqrtPriceX96: bigint; sender?: Address; recipient?: Address }
     try {
       const decoded = decodeEventLog({ abi: [uniswapV3SwapEvent], data: log.data, topics: log.topics })
-      args = decoded.args as unknown as { amount0: bigint; amount1: bigint; sqrtPriceX96: bigint }
+      args = decoded.args as unknown as {
+        amount0: bigint
+        amount1: bigint
+        sqrtPriceX96: bigint
+        sender?: Address
+        recipient?: Address
+      }
     } catch {
       return null
     }
@@ -184,15 +253,22 @@ export class TradeIngest {
       blockNumber: log.blockNumber,
       txHash: log.transactionHash,
       venue: 'uniswap-v3',
+      parties: [args.sender, args.recipient].filter((a): a is Address => Boolean(a)).map((a) => a.toLowerCase()),
     }
   }
 
   private decodeCurveTrade(log: Log, tsOf: (block: bigint) => number, eth: number | null): Trade | null {
     if (log.blockNumber === null || log.transactionHash === null) return null
-    let args: { token: Address; isBuy: boolean; tokenAmount: bigint; quoteAmount: bigint }
+    let args: { token: Address; trader?: Address; isBuy: boolean; tokenAmount: bigint; quoteAmount: bigint }
     try {
       const decoded = decodeEventLog({ abi: [odysseyTradedEvent], data: log.data, topics: log.topics })
-      args = decoded.args as unknown as { token: Address; isBuy: boolean; tokenAmount: bigint; quoteAmount: bigint }
+      args = decoded.args as unknown as {
+        token: Address
+        trader?: Address
+        isBuy: boolean
+        tokenAmount: bigint
+        quoteAmount: bigint
+      }
     } catch {
       return null
     }
@@ -210,6 +286,7 @@ export class TradeIngest {
       blockNumber: log.blockNumber,
       txHash: log.transactionHash,
       venue: 'odyssey-curve',
+      parties: args.trader ? [args.trader.toLowerCase()] : [],
     }
   }
 }
