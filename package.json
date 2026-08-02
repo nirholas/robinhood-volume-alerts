@@ -1,0 +1,64 @@
+{
+  "name": "robinhood-volume-alerts",
+  "version": "0.1.0",
+  "description": "Telegram bot for Robinhood Chain crypto (chain ID 4663). Learns every token's normal per-minute trading volume from live on-chain swaps and alerts when a token trades N x above it. Tunable sensitivity, price/mcap/liquidity/holder context in every alert.",
+  "keywords": [
+    "robinhood",
+    "robinhood-chain",
+    "volume-alerts",
+    "telegram-bot",
+    "memecoin",
+    "uniswap-v3",
+    "alerts",
+    "trading"
+  ],
+  "license": "MIT",
+  "author": "nirholas (https://x.com/nichxbt)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nirholas/robinhood-volume-alerts.git"
+  },
+  "homepage": "https://github.com/nirholas/robinhood-volume-alerts",
+  "bugs": {
+    "url": "https://github.com/nirholas/robinhood-volume-alerts/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/src/index.js",
+  "bin": {
+    "robinhood-volume-alerts": "./dist/src/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "Dockerfile"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dry-run": "tsx scripts/dry-run.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.0",
+    "grammy": "^1.45.0",
+    "hoodchain": "^0.1.1",
+    "hoodkit": "^0.1.1",
+    "pino": "^10.3.0",
+    "viem": "2.55.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
