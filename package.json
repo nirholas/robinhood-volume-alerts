@@ -1,7 +1,7 @@
 {
   "name": "robinhood-volume-alerts",
-  "version": "0.1.0",
-  "description": "Telegram bot for Robinhood Chain crypto (chain ID 4663). Learns every token's normal per-minute trading volume from live on-chain swaps and alerts when a token trades N x above it. Tunable sensitivity, price/mcap/liquidity/holder context in every alert.",
+  "version": "0.2.0",
+  "description": "Telegram bot for Robinhood Chain crypto (chain ID 4663). Learns every token's normal per-minute trading volume from live on-chain swaps and alerts on volume spikes, whale trades, price moves, liquidity pulls, launches, and watched wallets. Tracks how its own calls performed.",
   "keywords": [
     "robinhood",
     "robinhood-chain",
