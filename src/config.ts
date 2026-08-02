@@ -12,6 +12,8 @@ export interface Defaults {
 
 export interface Config {
   telegramToken: string | null
+  /** Channel (@name or -100… id) that mirrors the feed at default sensitivity. */
+  telegramChannelId: string | null
   rpcUrl: string | undefined
   dbPath: string
   baselineMinutes: number
@@ -40,6 +42,7 @@ export const SETTING_DEFAULTS: Defaults = {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     telegramToken: env.TELEGRAM_BOT_TOKEN?.trim() || null,
+    telegramChannelId: env.TELEGRAM_CHANNEL_ID?.trim() || null,
     rpcUrl: env.RPC_URL?.trim() || undefined,
     dbPath: env.DB_PATH?.trim() || './data/volume-alerts.db',
     baselineMinutes: num(env.BASELINE_MINUTES, 60, 'BASELINE_MINUTES'),

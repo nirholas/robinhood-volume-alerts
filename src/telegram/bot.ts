@@ -223,8 +223,9 @@ export class TelegramAlertBot {
 
   // ---- delivery ---------------------------------------------------------------
 
-  /** Fan an alert out to every eligible subscriber. */
+  /** Fan an alert out to the channel feed and every eligible subscriber. */
   async deliver(alert: SpikeAlert): Promise<void> {
+    if (this.cfg.telegramChannelId) this.deliverToChannel(this.cfg.telegramChannelId, alert)
     const chats = this.store.listActiveChats()
     for (const chat of chats) {
       if (!this.eligible(chat, alert)) continue
@@ -252,6 +253,35 @@ export class TelegramAlertBot {
         }
       })
     }
+  }
+
+  /**
+   * The public channel feed: default sensitivity, the shared per-token
+   * cooldown, and URL-only buttons (a mute button would make no sense on a
+   * broadcast). Delivery failures log and retry on the next spike; the
+   * common cause is the bot not yet being a channel admin.
+   */
+  private deliverToChannel(channelId: string, alert: SpikeAlert): void {
+    const channelChat: ChatSettings = { chatId: channelId, ...this.cfg.defaults, paused: false }
+    if (!this.eligible(channelChat, alert)) return
+    this.enqueue(async () => {
+      try {
+        await this.bot.api.sendMessage(channelId, renderAlertHtml(alert), {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+          reply_markup: new InlineKeyboard()
+            .url('📊 DexScreener', dexScreenerUrl(alert.token))
+            .url('🔍 Scan', explorerTokenUrl(alert.token)),
+        })
+        this.store.setLastAlert(channelId, alert.token, alert.at)
+        this.alertsSent++
+      } catch (error) {
+        logger.warn(
+          { channelId, err: String(error) },
+          'channel post failed (is the bot an admin with post permission?)',
+        )
+      }
+    })
   }
 
   eligible(chat: ChatSettings, alert: SpikeAlert): boolean {
