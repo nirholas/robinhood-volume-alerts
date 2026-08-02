@@ -76,8 +76,6 @@ export class TelegramAlertBot {
   readonly bot: Bot
   private queue: Promise<void> = Promise.resolve()
   alertsSent = 0
-  /** Chats that received the most recent alert, for performance tracking. */
-  private lastRecipients: string[] = []
 
   constructor(
     token: string,
@@ -526,7 +524,6 @@ export class TelegramAlertBot {
         }
       })
     }
-    this.lastRecipients = reached
     return reached
   }
 
@@ -635,6 +632,3 @@ export class TelegramAlertBot {
     await this.bot.stop()
   }
 }
-
-/** Re-exported so the console transport can render the same cards. */
-export { renderAlertHtml, fmtAge }
