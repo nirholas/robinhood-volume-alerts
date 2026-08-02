@@ -405,6 +405,14 @@ export class Store {
     return row ? row.close_price : null
   }
 
+  /** Minute index of the most recent bucket at or after `sinceMinute`. */
+  latestBucketMinute(token: string, sinceMinute: number): number | null {
+    const row = this.db
+      .prepare('SELECT minute FROM minute_buckets WHERE token = ? AND minute >= ? ORDER BY minute DESC LIMIT 1')
+      .get(token.toLowerCase(), sinceMinute) as { minute: number } | undefined
+    return row ? row.minute : null
+  }
+
   /** Most recent close price for a token, at or after `sinceMinute`. */
   latestPrice(token: string, sinceMinute: number): number | null {
     const row = this.db

@@ -31,7 +31,13 @@ export async function buildSnapshot(
 ): Promise<TokenSnapshot> {
   const identity = await meta.get(token as `0x${string}`)
   const enrichment = await enricher.enrich(token, priceUsd)
-  const oneMinuteAgo = referencePrice ?? store.closePriceAtOrBefore(token, nowMinute - 1, 3)
+
+  // Anchor the 1m delta to the minute BEFORE the newest bucket. Anchoring it
+  // to `nowMinute - 1` compares the latest close against itself whenever the
+  // newest data is a minute old, which rendered as a flat "1m +0.0%" on every
+  // card that did not pass its own reference price.
+  const latestMinute = store.latestBucketMinute(token, nowMinute - 5) ?? nowMinute - 1
+  const oneMinuteAgo = referencePrice ?? store.closePriceAtOrBefore(token, latestMinute - 1, 3)
 
   return {
     symbol: identity.symbol,

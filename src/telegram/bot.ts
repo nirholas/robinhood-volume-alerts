@@ -81,6 +81,12 @@ export class TelegramAlertBot {
     token: string,
     private readonly store: Store,
     private readonly cfg: Config,
+    /**
+     * Resolves symbols for tokens the alert path has never touched. `/top`
+     * ranks by raw volume, so it routinely surfaces coins with no cached
+     * metadata; without this they would render as bare addresses.
+     */
+    private readonly meta?: { get: (token: `0x${string}`) => Promise<{ symbol: string | null }> },
   ) {
     this.bot = new Bot(token)
     this.wire()
@@ -206,11 +212,23 @@ export class TelegramAlertBot {
     return { text: `👁 <b>Watchlist</b>\n\n${body}`, keyboard }
   }
 
-  private topText(): string {
+  private async topText(): Promise<string> {
     const nowMinute = Math.floor(Date.now() / 60000)
     const movers = this.store.topMovers(nowMinute - 60, nowMinute, 10)
     if (movers.length === 0) {
       return '📊 <b>Top movers</b>\n\nNo trades recorded in the last hour yet. Give the feed a minute.'
+    }
+    if (this.meta) {
+      const unknown = movers.filter((m) => !m.symbol)
+      await Promise.all(
+        unknown.map(async (m) => {
+          try {
+            m.symbol = (await this.meta?.get(m.token as `0x${string}`))?.symbol ?? null
+          } catch {
+            // Leave it as an address rather than failing the whole panel.
+          }
+        }),
+      )
     }
     const lines = movers.map((m, i) => {
       const name = m.symbol ? escapeHtml(m.symbol) : shortAddr(m.token)
@@ -361,7 +379,7 @@ export class TelegramAlertBot {
     })
 
     this.bot.command('top', async (ctx) => {
-      await reply(ctx, this.topText())
+      await reply(ctx, await this.topText())
     })
 
     this.bot.command('scorecard', async (ctx) => {
@@ -444,7 +462,7 @@ export class TelegramAlertBot {
         await editTo(text, keyboard)
         await ctx.answerCallbackQuery()
       } else if (data === 'menu:top') {
-        await editTo(this.topText(), new InlineKeyboard().text('‹ Back', 'menu:main').text('✕ Close', 'menu:close'))
+        await editTo(await this.topText(), new InlineKeyboard().text('‹ Back', 'menu:main').text('✕ Close', 'menu:close'))
         await ctx.answerCallbackQuery()
       } else if (data === 'menu:scorecard') {
         await editTo(this.scorecardText(), new InlineKeyboard().text('‹ Back', 'menu:main').text('✕ Close', 'menu:close'))

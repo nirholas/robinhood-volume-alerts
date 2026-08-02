@@ -46,7 +46,7 @@ export async function startApp(overrides: Partial<ReturnType<typeof loadConfig>>
   const tracker = new VolumeTracker(store)
   const launchHistory = new LaunchTracker(client, store)
 
-  const telegram = cfg.telegramToken ? new TelegramAlertBot(cfg.telegramToken, store, cfg) : null
+  const telegram = cfg.telegramToken ? new TelegramAlertBot(cfg.telegramToken, store, cfg, meta) : null
   if (!telegram) {
     logger.warn('TELEGRAM_BOT_TOKEN is not set: alerts print to the console only')
   }
@@ -61,7 +61,7 @@ export async function startApp(overrides: Partial<ReturnType<typeof loadConfig>>
   }
 
   const spike = new SpikeDetector(store, tracker, enricher, meta, cfg, emit)
-  const trades = new TradeDetectors(store, meta, enricher, emit)
+  const trades = new TradeDetectors(store, meta, enricher, cfg.defaults.whaleMinUsd, emit)
   const priceMoves = new PriceMoveDetector(store, meta, enricher, cfg.defaults.priceMovePct, emit)
   const liquidity = new LiquidityMonitor(client, store, ethPrice, meta, enricher, cfg.defaults.rugDropPct, emit)
   const launchpads = new LaunchpadDetectors(client, store, meta, emit)

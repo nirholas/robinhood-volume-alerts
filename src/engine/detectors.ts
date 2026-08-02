@@ -33,13 +33,20 @@ export class TradeDetectors {
     private readonly store: Store,
     private readonly meta: TokenMetaCache,
     private readonly enricher: Enricher,
+    /**
+     * Floor used when no chat has registered yet. The channel feed and dry
+     * runs both deliver at the default sensitivity without appearing in the
+     * chats table, so falling back to Infinity here would silence whale
+     * alerts on exactly those deployments.
+     */
+    private readonly fallbackWhaleUsd: number,
     private readonly emit: EmitAlert,
   ) {}
 
   /** Cheapest possible whale gate across active subscribers. */
   private whaleFloor(): number {
     const chats = this.store.listActiveChats().filter((c) => c.kinds.includes('whale'))
-    const floor = chats.length === 0 ? Infinity : Math.min(...chats.map((c) => c.whaleMinUsd))
+    const floor = chats.length === 0 ? this.fallbackWhaleUsd : Math.min(...chats.map((c) => c.whaleMinUsd))
     return Math.max(TradeDetectors.ABSOLUTE_WHALE_FLOOR, floor)
   }
 
