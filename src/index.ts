@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHoodClient } from 'hoodchain'
 import { loadConfig } from './config.js'
+import { loadDotEnv } from './env.js'
 import { Store } from './db.js'
 import { EthPrice } from './chain/eth-price.js'
 import { PoolRegistry } from './chain/pools.js'
@@ -30,6 +31,7 @@ export interface App {
  * identical in both modes; there is no mock lane.
  */
 export async function startApp(overrides: Partial<ReturnType<typeof loadConfig>> = {}): Promise<App> {
+  loadDotEnv()
   const cfg = { ...loadConfig(), ...overrides }
   const store = new Store(cfg.dbPath, cfg.defaults)
   const client = createHoodClient(cfg.rpcUrl ? { rpcUrl: cfg.rpcUrl } : {})
