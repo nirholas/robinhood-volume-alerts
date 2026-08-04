@@ -1,0 +1,14 @@
+/* TEAM */
+Builder: nirholas
+Site: https://github.com/nirholas
+X: https://x.com/nichxbt
+
+/* THANKS */
+The Robinhood Chain public RPC, for allowing address-less log scans.
+grammY, better-sqlite3, viem, pino: the load-bearing dependencies.
+
+/* SITE */
+Standards: TypeScript strict, ESM, zero mock data
+Components: Node.js 20+, SQLite (WAL), Telegram Bot API, Robinhood Chain RPC
+Live: https://t.me/hoodcryptochainbot
+Feed: https://t.me/hoodchains

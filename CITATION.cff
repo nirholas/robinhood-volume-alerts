@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you build on this software, a citation or a link back is appreciated."
+title: "robinhood-volume-alerts: real-time DEX trading alerts for Robinhood Chain"
+type: software
+authors:
+  - family-names: "Holas"
+    given-names: "Nicholas"
+    alias: nirholas
+repository-code: "https://github.com/nirholas/robinhood-volume-alerts"
+url: "https://github.com/nirholas/robinhood-volume-alerts"
+license: MIT
+keywords:
+  - robinhood-chain
+  - telegram-bot
+  - trading-alerts
+  - volume-analysis
+  - blockchain-monitoring
+  - uniswap-v3

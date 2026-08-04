@@ -1,0 +1,35 @@
+# robinhood-volume-alerts
+
+> Telegram alert bot for Robinhood Chain (EVM chain id 4663). Watches every DEX trade on the chain via the public RPC, learns each token's normal per-minute volume, and alerts on volume spikes, whale trades, price moves, liquidity pulls (rug warnings), new launches, graduations, and watched-wallet trades. Tracks the performance of its own calls (2x/5x/10x follow-ups and a scorecard). One Node.js process, one SQLite file, no API keys.
+
+Install: `npm install -g robinhood-volume-alerts`. Binaries: `robinhood-volume-alerts` and `hood-alerts`. Commands: `start`, `dry-run` (live pipeline, console only, no Telegram token needed), `doctor` (checks RPC, chain id, log-scan support, database, Telegram token, channel post permission), `version`. Configuration is environment based; `TELEGRAM_BOT_TOKEN` is the only required variable. Library entry point: `startApp()` from the package root.
+
+Live instance: t.me/hoodcryptochainbot with the public feed at t.me/hoodchains.
+
+## Docs
+
+- [Getting started](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/getting-started.md): zero to running bot, five minutes
+- [Configuration](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/configuration.md): every environment variable and default
+- [Alert types](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/alerts.md): all eight alert kinds, thresholds, cooldown and dedup rules
+- [Telegram commands](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/commands.md): full command reference
+- [CLI reference](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/cli.md): start, dry-run, doctor, exit codes
+- [Self-hosting](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/self-hosting.md): Docker, systemd, backups, updating
+- [Architecture](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/architecture.md): ingest, detection, enrichment, delivery internals
+- [Troubleshooting](https://github.com/nirholas/robinhood-volume-alerts/blob/main/docs/troubleshooting.md): symptom to cause, including the channel Post Messages trap
+
+## Tutorials
+
+- [Your own alert bot in five minutes](https://github.com/nirholas/robinhood-volume-alerts/blob/main/tutorials/01-your-own-bot.md)
+- [Watch a wallet](https://github.com/nirholas/robinhood-volume-alerts/blob/main/tutorials/02-watch-a-wallet.md)
+- [Run a public channel feed](https://github.com/nirholas/robinhood-volume-alerts/blob/main/tutorials/03-public-channel.md)
+
+## For agents
+
+- [AGENTS.md](https://github.com/nirholas/robinhood-volume-alerts/blob/main/AGENTS.md): repo map, invariants, how to add an alert type
+- [llms-full.txt](https://github.com/nirholas/robinhood-volume-alerts/blob/main/llms-full.txt): every doc above concatenated into one file
+
+## Optional
+
+- [README](https://github.com/nirholas/robinhood-volume-alerts/blob/main/README.md)
+- [Changelog](https://github.com/nirholas/robinhood-volume-alerts/blob/main/CHANGELOG.md)
+- [npm package](https://www.npmjs.com/package/robinhood-volume-alerts)

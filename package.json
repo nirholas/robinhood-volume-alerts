@@ -1,16 +1,29 @@
 {
   "name": "robinhood-volume-alerts",
-  "version": "0.2.1",
-  "description": "Telegram bot for Robinhood Chain crypto (chain ID 4663). Learns every token's normal per-minute trading volume from live on-chain swaps and alerts on volume spikes, whale trades, price moves, liquidity pulls, launches, and watched wallets. Tracks how its own calls performed.",
+  "version": "0.3.0",
+  "description": "Real-time Telegram alerts for Robinhood Chain (chain id 4663): volume spikes, whale trades, price moves, rug warnings, launches, graduations, wallet tracking, and a scorecard that follows how every call performed. One process, one SQLite file, no API keys.",
   "keywords": [
     "robinhood",
     "robinhood-chain",
-    "volume-alerts",
+    "robinhood chain",
     "telegram-bot",
+    "telegram",
+    "crypto-alerts",
+    "trading-alerts",
+    "volume-alerts",
+    "volume-spike",
+    "whale-alerts",
+    "whale-tracker",
+    "wallet-tracker",
+    "rug-detection",
     "memecoin",
+    "defi",
+    "dex",
     "uniswap-v3",
-    "alerts",
-    "trading"
+    "evm",
+    "blockchain-monitoring",
+    "onchain-data",
+    "cli"
   ],
   "license": "MIT",
   "author": "nirholas (https://x.com/nichxbt)",
@@ -18,7 +31,7 @@
     "type": "git",
     "url": "git+https://github.com/nirholas/robinhood-volume-alerts.git"
   },
-  "homepage": "https://github.com/nirholas/robinhood-volume-alerts",
+  "homepage": "https://github.com/nirholas/robinhood-volume-alerts#readme",
   "bugs": {
     "url": "https://github.com/nirholas/robinhood-volume-alerts/issues"
   },
@@ -28,12 +41,19 @@
   },
   "main": "./dist/src/index.js",
   "bin": {
-    "robinhood-volume-alerts": "./dist/src/index.js"
+    "robinhood-volume-alerts": "./dist/src/cli.js",
+    "hood-alerts": "./dist/src/cli.js"
   },
   "files": [
     "dist",
+    "docs",
+    "tutorials",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
+    "llms.txt",
+    "llms-full.txt",
+    "AGENTS.md",
     ".env.example",
     "Dockerfile"
   ],
@@ -44,7 +64,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "dry-run": "tsx scripts/dry-run.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "build:llms": "node scripts/build-llms.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.0",
