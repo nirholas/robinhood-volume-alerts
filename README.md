@@ -149,3 +149,7 @@ Robinhood Chain crypto only: memecoins and tokens trading on the chain's DEXes a
 ## License
 
 MIT
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=nirholas/robinhood-volume-alerts&type=Date)](https://www.star-history.com/#nirholas/robinhood-volume-alerts&Date)
