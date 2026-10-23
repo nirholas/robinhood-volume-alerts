@@ -149,7 +149,15 @@ export class TradeIngest {
    */
   private isResultCapError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error)
-    return /exceeds limit|more than \d+ results|too many results|query returned more than|limit exceeded/i.test(message)
+    // Throttling often says "limit exceeded" too. Check backpressure first:
+    // splitting a throttled range only multiplies the requests that caused it.
+    if (/rate[\s_-]*limit|request[\s_-]*rate|quota|request[\s_-]*budget|\b429\b|too many requests/i.test(message)) {
+      return false
+    }
+    // Split only when the provider explicitly names a log-result count cap or
+    // a block-span cap. Generic and unknown limit errors keep the full range
+    // so a throughput failure is retried rather than mistaken for a result cap.
+    return /logs? matched by query[\s\S]*?(?:limit|cap)|more than \d+ results|too many results|block range[\s\S]*?(?:exceeds?|over)[\s\S]*?(?:limit|cap)/i.test(message)
   }
 
   private shrinkChunk(): void {
