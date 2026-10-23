@@ -151,7 +151,11 @@ export class TradeIngest {
     const message = error instanceof Error ? error.message : String(error)
     // Throttling often says "limit exceeded" too. Check backpressure first:
     // splitting a throttled range only multiplies the requests that caused it.
-    if (/rate[\s_-]*limit|request[\s_-]*rate|quota|request[\s_-]*budget|\b429\b|too many requests/i.test(message)) {
+    if (
+      /rate[\s_-]*limit|request[\s_-]*rate|quota|request[\s_-]*budget|too many requests|(?:\bhttp(?:\/\d+(?:\.\d+)?)?|\bstatus(?:[\s_-]*code)?)\b\s*[:=#-]?\s*429\b/i.test(
+        message,
+      )
+    ) {
       return false
     }
     // Split only when the provider explicitly names a log-result count cap or

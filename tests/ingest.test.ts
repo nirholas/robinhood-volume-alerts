@@ -94,6 +94,8 @@ const nonCapErrors = [
   ['daily quota exceeded', false],
   ['too many requests', false],
   ['HTTP 429: logs matched by query exceeds limit of 10000', false],
+  ['status:429: logs matched by query exceeds limit of 10000', false],
+  ['HTTP/1.1 429: logs matched by query exceeds limit of 10000', false],
   ['limit exceeded', true],
   ['execution limit exceeded', false],
   ['connection reset', false],
@@ -101,7 +103,9 @@ const nonCapErrors = [
 
 const capErrors = [
   'logs matched by query exceeds limit of 10000',
+  'logs matched by query exceeds limit of 429',
   'query returned more than 10000 results',
+  'query returned more than 429 results',
   'too many results',
   'query block range exceeds server limit, narrow your filter: 1000',
 ] as const
