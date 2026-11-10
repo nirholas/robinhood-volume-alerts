@@ -1,0 +1,21 @@
+{
+  "name": "robinhood-volume-alerts",
+  "owner": {
+    "name": "nirholas"
+  },
+  "description": "Run and troubleshoot a Telegram bot that alerts when a Robinhood Chain token trades a multiple of its normal volume.",
+  "plugins": [
+    {
+      "name": "robinhood-volume-alerts",
+      "source": "./plugins/robinhood-volume-alerts",
+      "description": "Run and troubleshoot a Telegram bot that alerts when a Robinhood Chain token trades a multiple of its normal volume.",
+      "category": "automation",
+      "tags": [
+        "robinhood-chain",
+        "telegram-bot",
+        "alerts",
+        "trading"
+      ]
+    }
+  ]
+}

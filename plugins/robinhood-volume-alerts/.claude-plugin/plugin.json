@@ -1,0 +1,17 @@
+{
+  "name": "robinhood-volume-alerts",
+  "version": "0.3.0",
+  "description": "Run and troubleshoot a Telegram bot that alerts when a Robinhood Chain token trades a multiple of its normal volume.",
+  "author": {
+    "name": "nirholas"
+  },
+  "repository": "https://github.com/nirholas/robinhood-volume-alerts",
+  "homepage": "https://github.com/nirholas/robinhood-volume-alerts",
+  "license": "MIT",
+  "keywords": [
+    "robinhood-chain",
+    "telegram-bot",
+    "volume-alerts",
+    "crypto"
+  ]
+}
